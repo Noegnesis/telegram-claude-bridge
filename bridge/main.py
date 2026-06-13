@@ -14,9 +14,11 @@ from bridge.inject import (
     has_session,
     inject,
     pane_accepts_input,
+    pane_has_clean_prompt,
     pane_is_busy,
     pane_is_claude_idle,
     pane_is_safe_to_inject,
+    pane_is_static,
 )
 from bridge.parse import detect_message_type, extract_text, is_authorized
 from bridge.state import Backoff, State
@@ -109,6 +111,20 @@ def _latest_outbound_epoch(messages_path: Path | None = None) -> float | None:
         if ts:
             return _iso_to_epoch(ts)
     return None
+
+
+def _pane_busy_for_detector(pane: str) -> bool:
+    """`busy` input for `_inject_stuck_due`, staleness-corrected.
+
+    `pane_is_busy`'s `…` heuristic suppressed the inject-stuck alert for the
+    same false-busy pane that blocked injection (2026-06-05: a truncated
+    tool-call display `[monitor]…)` in a finished turn's tail — blocked 10.5h,
+    zero alerts). A static pane cannot be actively working, so it is never
+    busy for suppression purposes; the alert fires and the user learns their
+    message is stuck. Short-circuits: pane_is_static (~4s of sampling) only
+    runs when the text heuristic says busy, and only while inject-blocked.
+    """
+    return pane_is_busy(pane) and not pane_is_static(pane)
 
 
 def _inject_stuck_due(
@@ -393,6 +409,16 @@ def wait_for_pane(pane: str, timeout: int = 30, require_idle: bool = True) -> bo
     while time.time() < deadline:
         if has_session(session) and pane_accepts_input(pane):
             if not require_idle or pane_is_safe_to_inject(pane):
+                return True
+            # Escape hatch (2026-06-05): `…` in a FINISHED turn's transcript
+            # tail (e.g. a truncated tool-call display `[monitor]…)`) makes
+            # pane_is_safe_to_inject false-busy forever — the pane is static,
+            # so the line never scrolls out. A byte-identical pane across
+            # samples cannot be working (busy UI animates), so static + clean
+            # empty prompt ⇒ injectable despite the heuristic.
+            if pane_has_clean_prompt(pane) and pane_is_static(pane):
+                logger.info("pane %s static with clean prompt; "
+                            "overriding busy heuristic", pane)
                 return True
         time.sleep(2)
     return False
@@ -680,7 +706,8 @@ def main(
                         inject_blocked_since = now
                     elif not inject_stuck_alerted and _inject_stuck_due(
                         inject_blocked_since, now,
-                        busy=pane_is_busy(pane), health_state=health.state,
+                        busy=_pane_busy_for_detector(pane),
+                        health_state=health.state,
                     ):
                         _send_alert(INJECT_STUCK_TEXT)
                         inject_stuck_alerted = True

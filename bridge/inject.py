@@ -172,6 +172,127 @@ def pane_is_safe_to_inject(pane: str) -> bool:
     return True
 
 
+def pane_is_static(pane: str, samples: int = 3, interval: float = 2.0) -> bool:
+    """True if pane content is byte-identical across `samples` captures taken
+    `interval`s apart.
+
+    Ground truth for "not actively working" that survives UI copy drift:
+    Claude Code's in-progress UI always animates (the spinner glyph cycles
+    sub-second, elapsed timers and token counts tick), so a static pane
+    cannot be mid-task. Exists because the `…` text heuristic in
+    `pane_is_claude_idle` permanently false-busied on a truncated tool-call
+    display (`[monitor]…)`) left in the transcript tail of a FINISHED turn —
+    static pane, line never scrolled out, delivery blocked 10.5h
+    (2026-06-05).
+
+    Conservative on capture failure: False (unknown ⇒ assume active).
+    """
+    prev = None
+    for i in range(samples):
+        if i:
+            time.sleep(interval)
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", pane, "-p"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return False
+        if prev is not None and result.stdout != prev:
+            return False
+        prev = result.stdout
+    return True
+
+
+_CSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def _prompt_line_has_real_text(styled_line: str) -> bool:
+    """True if the input-box line contains user-typed text after `❯`.
+
+    Claude Code renders ghost-text suggestions (an auto-suggested reply shown
+    in an EMPTY input box) as SGR-dim (`2`) text, with the terminal cursor as
+    a reverse-video (`7`) block on the first char:
+
+        \\e[39m❯\\xa0\\e[7mc\\e[0;2mompare against my 00-06 structure\\e[0m
+
+    Real typed input renders at normal intensity. A dim-only line is an empty
+    input box wearing a suggestion — injectable. Treating the ghost as a
+    draft would black-hole delivery forever: it cannot be cleared (Esc,
+    Enter, BSpace are all no-ops on a suggestion; verified live 2026-06-05).
+
+    Walks the styled line tracking dim/reverse state; any normal-intensity
+    visible char after the `❯` marker ⇒ real draft.
+    """
+    seen_prompt = False
+    dim = reverse = False
+    i = 0
+    while i < len(styled_line):
+        m = _SGR_RE.match(styled_line, i)
+        if m:
+            params = m.group(1)
+            codes = [int(c) for c in params.split(";") if c] if params else [0]
+            for code in codes:
+                if code == 0:
+                    dim = reverse = False
+                elif code == 2:
+                    dim = True
+                elif code == 7:
+                    reverse = True
+                elif code == 22:
+                    dim = False
+                elif code == 27:
+                    reverse = False
+            i = m.end()
+            continue
+        ch = styled_line[i]
+        if ch == "❯":
+            seen_prompt = True
+        elif seen_prompt and ch.strip() and ch != "\xa0":
+            if not dim and not reverse:
+                return True
+        i += 1
+    return False
+
+
+def pane_has_clean_prompt(pane: str) -> bool:
+    """True if the input box (the LAST `❯` line in the non-footer tail) is
+    empty — no unsent draft — and the tail shows no interactive prompt
+    pattern and no `esc to interrupt` active-work marker.
+
+    Used by `wait_for_pane`'s static-pane escape hatch (2026-06-05): together
+    with `pane_is_static` it certifies a pane as injectable even when
+    `pane_is_claude_idle` rule #1 false-busies on transcript content. A draft
+    after `❯` keeps this False — injecting would append to the draft and
+    submit garbage; that branch is covered by the inject-stuck alert instead.
+    Ghost-text suggestions (dim-rendered, see `_prompt_line_has_real_text`)
+    do NOT count as drafts — the input box under them is empty.
+    """
+    result = subprocess.run(
+        ["tmux", "capture-pane", "-t", pane, "-p", "-e"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return False
+    styled = result.stdout.splitlines()
+    plain = [_CSI_RE.sub("", l) for l in styled]
+    tail = [(p, s) for p, s in zip(plain, styled)
+            if p.strip() and not _is_status_bar_line(p)][-12:]
+    if any("esc to interrupt" in p for p, _ in tail):
+        return False
+    for p, _ in tail:
+        for pattern in _INTERACTIVE_PROMPT_PATTERNS:
+            if pattern.search(p):
+                return False
+    prompt_lines = [(p, s) for p, s in tail if "❯" in p]
+    if not prompt_lines:
+        return False
+    p, s = prompt_lines[-1]
+    if p.split("❯", 1)[1].strip() == "":
+        return True
+    return not _prompt_line_has_real_text(s)
+
+
 def _text_still_in_prompt(pane: str, text: str) -> bool:
     """True if `text` is still sitting on the `❯` prompt line (typed but not
     submitted). Lets inject() detect a dropped Enter and re-submit.

@@ -130,6 +130,9 @@ def test_wait_for_pane_requires_idle_by_default(monkeypatch):
 
     monkeypatch.setattr(main_mod, "has_session", lambda s: True)
     monkeypatch.setattr(main_mod, "pane_accepts_input", lambda p: True)
+    # Keep the 2026-06-05 static-pane escape hatch out of this test's path
+    # (it would probe the real pane named in the call).
+    monkeypatch.setattr(main_mod, "pane_has_clean_prompt", lambda p: False)
 
     calls = {"n": 0}
     def fake_safe(pane):
@@ -429,6 +432,10 @@ def test_wait_for_pane_uses_safe_to_inject_not_claude_idle(monkeypatch):
     # claude_idle says True (would currently allow inject) but safe_to_inject says False
     monkeypatch.setattr(main_mod, "pane_is_claude_idle", lambda p: True)
     monkeypatch.setattr(main_mod, "pane_is_safe_to_inject", lambda p: False)
+    # A permission menu is not a clean prompt (`❯ 1. Yes` has text after ❯),
+    # so the 2026-06-05 escape hatch stays closed — mocked to keep this test
+    # off the real pane. Live-pane coverage: test_static_pane_2026_06_05.
+    monkeypatch.setattr(main_mod, "pane_has_clean_prompt", lambda p: False)
     monkeypatch.setattr("time.sleep", lambda *a, **k: None)
 
     result = main_mod.wait_for_pane("agents:monitor", timeout=2)
