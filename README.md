@@ -2,7 +2,8 @@
 
 A standalone Python long-poll process that connects a Telegram bot to an
 always-on Claude Code session ("the monitor"), so you can DM your agent from
-your phone and get replies back. Replaces the brittle
+your phone — text, voice memos (auto-transcribed), photos, and documents all
+land in the agent's hands — and get replies back. Replaces the brittle
 `telegram@claude-plugins-official` MCP plugin with three isolated processes.
 
 > Runs on Windows + WSL2 (Ubuntu). The bridge and monitor live inside WSL;
