@@ -30,8 +30,9 @@ MESSAGES_PATH = LOG_DIR / "bridge-messages.jsonl"
 INBOX_DIR = Path.home() / ".agents" / "inbox"
 TOOLS_DIR = Path.home() / "agents" / "tools"
 STALE_INBOX_SECONDS = 60  # Files older than this in INBOX_DIR → monitor likely wedged
-STALE_ALERT_TEXT = ("⚠️ monitor unresponsive — your last message is queued at "
-                    "~/.agents/inbox/. May need /login or restart.")
+STALE_ALERT_TEXT = ("⚠️ Your last message is queued unanswered (~/.agents/inbox/). "
+                    "I most likely replied only in my local pane — re-send it. If this "
+                    "keeps happening I may need a restart (or /login).")
 DEFER_THRESHOLD_SECONDS = 24 * 3600  # Files older than 24h → archive to inbox/.deferred/
 DEFERRED_SUBDIR = ".deferred"
 MAX_REINJECTS_PER_FILE = 3
@@ -44,6 +45,13 @@ INJECT_STUCK_THRESHOLD = 120  # seconds of inject-blocked-while-not-busy → ale
 INJECT_STUCK_TEXT = ("⚠️ I can't deliver your message — the monitor's input looks "
                      "stuck (an earlier message may be sitting unsent in the "
                      "prompt). It likely needs a restart.")
+# An outbound this short or shorter is a non-answer ack — the monitor's 👀
+# "I see you" emoji, which tg-send.sh logs as a text_len=1 outbound — not a
+# reply. Counting it as a reply triple-suppressed every safety net for a
+# message that got ONLY the ack: drained the inbox file, skipped the Stop-hook
+# fallback, and silenced the wedge alert (2026-06-22: a personal voice memo,
+# update_id 514106295, was lost exactly this way). A real reply is always longer.
+ACK_MAX_LEN = 2
 
 logger = logging.getLogger("bridge")
 
@@ -105,9 +113,15 @@ def _latest_outbound_epoch(messages_path: Path | None = None) -> float | None:
         if '"direction": "outbound"' not in ln:
             continue
         try:
-            ts = json.loads(ln).get("ts")
+            rec = json.loads(ln)
         except json.JSONDecodeError:
             continue
+        # Skip trivial acks (the 👀 emoji) — outbound, but not a reply. Missing
+        # text_len (older records) ⇒ treat as substantive so a real reply is
+        # never silently swallowed.
+        if rec.get("text_len", ACK_MAX_LEN + 1) <= ACK_MAX_LEN:
+            continue
+        ts = rec.get("ts")
         if ts:
             return _iso_to_epoch(ts)
     return None

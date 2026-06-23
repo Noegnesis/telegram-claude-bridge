@@ -25,6 +25,7 @@ import json, os, re, subprocess, sys, time
 from datetime import datetime
 
 log, window = sys.argv[1], float(sys.argv[2])
+ACK_MAX_LEN = 2  # outbound this short = a non-answer ack (👀), not a reply
 
 def epoch(ts):
     if not ts:
@@ -48,7 +49,10 @@ for ln in open(log, errors="replace"):
     if dirn == "inbound":
         last_in = ts
     elif dirn == "outbound":
-        last_out = ts
+        # Trivial acks (👀, text_len=1) are outbound but don't answer the user;
+        # mirrors main.py ACK_MAX_LEN so one emoji can't suppress the fallback.
+        if d.get("text_len", ACK_MAX_LEN + 1) > ACK_MAX_LEN:
+            last_out = ts
 
 ein, eout = epoch(last_in), epoch(last_out)
 if ein is None:
